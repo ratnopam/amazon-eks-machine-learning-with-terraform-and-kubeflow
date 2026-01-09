@@ -89,22 +89,18 @@ These variables are currently only used by EKS managed node groups (when `karpen
 
 ### IAM Permissions Analysis
 
-The Karpenter module's v1 IAM policy (`modules/karpenter/policy.tf`) already includes:
+The `terraform-aws-modules/eks//modules/karpenter` module (v20.37.0) uses an IAM policy based on Karpenter v0.33 which does **not** include capacity-reservation resources in the RunInstances statement.
 
-```hcl
-# Line 357-371 - Already present
-statement {
-  resources = [
-    "arn:${local.partition}:ec2:${local.region}:*:capacity-reservation/*",
-  ]
-  actions = [
-    "ec2:RunInstances",
-    "ec2:CreateFleet"
-  ]
-}
+**Missing Permissions** (both are required):
+
+1. `ec2:DescribeCapacityReservations` on `*` - Required for ODCR discovery
+2. `ec2:RunInstances` and `ec2:CreateFleet` on `capacity-reservation/*` - Required to launch instances into ODCR
+
+Without the second permission, Karpenter will fail with:
 ```
-
-**Missing Permission**: `ec2:DescribeCapacityReservations` is NOT in the current policy and is required for ODCR discovery.
+UnauthorizedOperation: You are not authorized to perform: ec2:RunInstances on resource:
+arn:aws:ec2:us-west-2:ACCOUNT_ID:capacity-reservation/cr-xxxxx
+```
 
 ---
 
@@ -141,50 +137,36 @@ values = [
 ]
 ```
 
-### 3.2 Add IAM Permission
+### 3.2 Add IAM Permissions
 
-Add `ec2:DescribeCapacityReservations` to the Karpenter controller IAM policy.
-
-**Option A**: Use `iam_policy_statements` variable in the Karpenter module:
+Add both required permissions using the `iam_policy_statements` variable in the Karpenter module:
 
 ```hcl
 # main.tf - module.karpenter
 module "karpenter" {
   # ... existing config ...
 
-  iam_policy_statements = [
+  # ODCR support - add permissions for capacity reservations
+  iam_policy_statements = var.karpenter_odcr_enabled ? [
     {
       sid       = "AllowDescribeCapacityReservations"
       effect    = "Allow"
       actions   = ["ec2:DescribeCapacityReservations"]
       resources = ["*"]
+    },
+    {
+      sid       = "AllowRunInstancesOnCapacityReservation"
+      effect    = "Allow"
+      actions   = ["ec2:RunInstances", "ec2:CreateFleet"]
+      resources = ["arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:capacity-reservation/*"]
     }
-  ]
+  ] : []
 }
 ```
 
-**Option B**: Create a separate IAM policy and attach it:
-
-```hcl
-resource "aws_iam_role_policy" "karpenter_odcr" {
-  count = var.karpenter_enabled && var.karpenter_odcr_enabled ? 1 : 0
-
-  name = "${var.cluster_name}-karpenter-odcr"
-  role = module.karpenter[0].iam_role_name
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid      = "AllowDescribeCapacityReservations"
-        Effect   = "Allow"
-        Action   = ["ec2:DescribeCapacityReservations"]
-        Resource = ["*"]
-      }
-    ]
-  })
-}
-```
+This adds both:
+1. Permission to discover/describe ODCRs
+2. Permission to launch instances into ODCRs (missing from the base Karpenter module policy)
 
 ### 3.3 Add New Terraform Variables
 
@@ -623,51 +605,90 @@ resource "aws_subnet" "private" {
 
 ## 9. Implementation Checklist
 
-- [ ] **Phase 1: Prerequisites**
-  - [ ] Purchase/verify ODCR in AWS Console or via CLI
-  - [ ] Note ODCR ID, instance type, and AZ
-  - [ ] Verify subnet AZ matches ODCR AZ
+- [x] **Phase 1: Prerequisites**
+  - [x] Purchase/verify ODCR in AWS Console or via CLI:
+    ```bash
+    # Create an ODCR
+    aws ec2 create-capacity-reservation \
+      --instance-type g5.xlarge \
+      --instance-platform Linux/UNIX \
+      --availability-zone us-west-2a \
+      --instance-count 1 \
+      --instance-match-criteria targeted
 
-- [ ] **Phase 2: Terraform Changes**
-  - [ ] Add new variables to `variables.tf`
-  - [ ] Add IAM permission for `ec2:DescribeCapacityReservations`
-  - [ ] Update `helm_release.karpenter` with feature gate
-  - [ ] Update `helm_release.karpenter_components` with ODCR config
+    # Describe existing ODCRs
+    aws ec2 describe-capacity-reservations \
+      --query 'CapacityReservations[].{Id:CapacityReservationId,Type:InstanceType,AZ:AvailabilityZone,State:State,Available:AvailableInstanceCount,Total:TotalInstanceCount}'
+    ```
+  - [x] Note ODCR ID, instance type, and AZ
+  - [x] Verify subnet AZ matches ODCR AZ
 
-- [ ] **Phase 3: Helm Chart Changes**
-  - [ ] Update `charts/karpenter-components/values.yaml`
-  - [ ] Update `charts/karpenter-components/templates/node-class.yaml`
-  - [ ] Update `charts/karpenter-components/templates/node-pool.yaml`
-  - [ ] Bump chart version to 1.1.0
+- [x] **Phase 2: Terraform Changes**
+  - [x] Add new variables to `variables.tf`
+  - [x] Add IAM permissions for `ec2:DescribeCapacityReservations` AND `ec2:RunInstances`/`ec2:CreateFleet` on `capacity-reservation/*`
+  - [x] Update `helm_release.karpenter` with feature gate
+  - [x] Update `helm_release.karpenter_components` with ODCR config
 
-- [ ] **Phase 4: Testing**
-  - [ ] Apply terraform changes
-  - [ ] Verify EC2NodeClass shows ODCR in status
-  - [ ] Create test pod with `reserved` nodeSelector
-  - [ ] Verify node has ODCR labels
-  - [ ] Test fallback behavior (if capacity exhausted)
+- [x] **Phase 3: Helm Chart Changes**
+  - [x] Update `charts/karpenter-components/values.yaml`
+  - [x] Update `charts/karpenter-components/templates/node-class.yaml`
+  - [x] Update `charts/karpenter-components/templates/node-pool.yaml`
+  - [ ] Bump chart version (skipped - kept at 1.0.7)
 
-- [ ] **Phase 5: Documentation**
-  - [ ] Update README with ODCR configuration section
-  - [ ] Add example tfvars for ODCR configuration
+- [x] **Phase 4: Testing**
+  - [x] Apply terraform changes
+  - [x] Verify EC2NodeClass shows ODCR in status
+  - [x] Create test workload (RayService)
+  - [x] Verify node has `karpenter.sh/capacity-type: reserved` label
+  - [x] Test fallback behavior with `["reserved", "on-demand"]`
+
+- [x] **Phase 5: Documentation**
+  - [x] Update README with ODCR configuration section
+  - [x] Add example terraform apply command with ODCR variables
 
 ---
 
-## 10. Files to Modify
+## 10. Lessons Learned from Testing
 
-| File | Change Type | Description |
-|------|-------------|-------------|
-| `variables.tf` | Add | New ODCR variables |
-| `main.tf` | Modify | Feature gate, IAM policy, helm values |
-| `charts/karpenter-components/values.yaml` | Modify | Add ODCR config structure |
-| `charts/karpenter-components/templates/node-class.yaml` | Modify | Add capacityReservationSelectorTerms |
-| `charts/karpenter-components/templates/node-pool.yaml` | Modify | Support multiple capacity types |
-| `charts/karpenter-components/Chart.yaml` | Modify | Bump version to 1.1.0 |
-| `README.md` | Modify | Document ODCR configuration |
+### IAM Policy Gap in terraform-aws-modules/eks
+
+The `terraform-aws-modules/eks//modules/karpenter` module (v20.37.0) uses an IAM policy based on Karpenter v0.33. This older policy version does **not** include `capacity-reservation/*` in the `ec2:RunInstances` resource list.
+
+**Symptom**: Karpenter controller logs show:
+```
+UnauthorizedOperation: You are not authorized to perform: ec2:RunInstances on resource:
+arn:aws:ec2:us-west-2:ACCOUNT_ID:capacity-reservation/cr-0cd766e74d14184fd
+```
+
+**Root Cause**: The module's policy includes RunInstances for instances, volumes, network interfaces, etc., but not capacity reservations.
+
+**Solution**: Add both permissions via `iam_policy_statements`:
+1. `ec2:DescribeCapacityReservations` on `*`
+2. `ec2:RunInstances` and `ec2:CreateFleet` on `capacity-reservation/*`
+
+### ODCR AZ Matching
+
+ODCRs are AZ-specific. If you create an ODCR in `us-west-2a` but Karpenter launches in `us-west-2c`, the ODCR won't be used. Ensure:
+- Multiple ODCRs in different AZs, or
+- NodePool/NodeClass subnet selector limits to ODCR's AZ
 
 ---
 
-## References
+## 11. Files Modified
+
+| File | Change Type | Description | Status |
+|------|-------------|-------------|--------|
+| `variables.tf` | Add | 8 new ODCR variables | Done |
+| `main.tf` | Modify | Feature gate, IAM policies (both DescribeCapacityReservations AND RunInstances), helm values | Done |
+| `charts/karpenter-components/values.yaml` | Modify | Add ODCR config structure | Done |
+| `charts/karpenter-components/templates/node-class.yaml` | Modify | Add capacityReservationSelectorTerms | Done |
+| `charts/karpenter-components/templates/node-pool.yaml` | Modify | Support multiple capacity types | Done |
+| `charts/karpenter-components/Chart.yaml` | Skip | Kept at 1.0.7 | Skipped |
+| `README.md` | Modify | Document ODCR configuration and variables | Done |
+
+---
+
+## 12. References
 
 - [Karpenter ODCR Documentation](https://karpenter.sh/docs/tasks/odcrs/)
 - [Karpenter ODCR Design Document](https://github.com/aws/karpenter-provider-aws/blob/main/designs/odcr.md)
