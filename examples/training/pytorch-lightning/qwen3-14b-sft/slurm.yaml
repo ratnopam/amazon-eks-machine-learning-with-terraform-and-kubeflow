@@ -1,0 +1,18 @@
+# Slurm Configuration Overlay for Qwen3-14B Fine-Tuning
+#
+# This overlay enables running the training job via Slurm scheduler
+# instead of Kubeflow Training Operator.
+#
+# Usage:
+#   See examples/training/slurm/pytorch-lightning/qwen3-14b-sft/finetune.ipynb
+#
+# The notebook reads fine-tune.yaml (base config) + this file (slurm overlay)
+# and generates sbatch scripts dynamically.
+
+slurm:
+  enabled: true
+  job_name: "ptl-qwen3-14b-sft"
+  partition: "gpu"
+  exclusive: true
+  # time: "24:00:00"  # Optional time limit
+  # account: "myproject"  # Optional account/project

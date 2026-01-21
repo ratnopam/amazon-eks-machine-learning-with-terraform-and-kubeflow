@@ -68,3 +68,45 @@ variable "db_port" {
   description = "DB port"
   type        = number
 }
+
+variable "slurmd_image_repository" {
+  description = "slurmd container image repository"
+  type        = string
+  default     = ""
+}
+
+variable "slurmd_image_tag" {
+  description = "slurmd container image tag"
+  type        = string
+  default     = "latest"
+}
+
+variable "compute_nodeset_replicas" {
+  description = "Number of slurmd pod replicas (0 = scale on demand)"
+  type        = number
+  default     = 0
+}
+
+variable "compute_gpu_per_node" {
+  description = "GPUs per slurmd pod"
+  type        = number
+  default     = 8
+}
+
+variable "compute_efa_per_node" {
+  description = "EFA interfaces per slurmd pod"
+  type        = number
+  default     = 4
+}
+
+variable "karpenter_nodepool_name" {
+  description = "Karpenter NodePool name for GPU compute nodes"
+  type        = string
+  default     = "cudaefa"
+}
+
+variable "efs_pvc_name" {
+  description = "EFS PVC name in kubeflow namespace"
+  type        = string
+  default     = "efs-pvc"
+}

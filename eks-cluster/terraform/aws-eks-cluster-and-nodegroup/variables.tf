@@ -473,6 +473,48 @@ variable "slurm_db_max_capacity" {
   default = 16.0
 }
 
+variable "slurmd_image_repository" {
+  description = "slurmd container image repository (e.g., <account>.dkr.ecr.<region>.amazonaws.com/slurmd-pytorch)"
+  type        = string
+  default     = ""
+}
+
+variable "slurmd_image_tag" {
+  description = "slurmd container image tag"
+  type        = string
+  default     = "25.05.0-cu126-py312"
+}
+
+variable "slurm_compute_replicas" {
+  description = "Number of slurmd pod replicas (0 = scale on demand via Karpenter)"
+  type        = number
+  default     = 0
+}
+
+variable "slurm_gpus_per_node" {
+  description = "GPUs per slurmd compute pod"
+  type        = number
+  default     = 8
+}
+
+variable "slurm_efa_per_node" {
+  description = "EFA interfaces per slurmd compute pod"
+  type        = number
+  default     = 4
+}
+
+variable "slurm_karpenter_nodepool" {
+  description = "Karpenter NodePool name for Slurm GPU compute nodes"
+  type        = string
+  default     = "cudaefa"
+}
+
+variable "slurm_efs_pvc_name" {
+  description = "EFS PVC name in kubeflow namespace to mount in slurmd pods"
+  type        = string
+  default     = "efs-pvc"
+}
+
 
 variable "mlflow_enabled" {
   description = "Install MLFlow, if enabled"

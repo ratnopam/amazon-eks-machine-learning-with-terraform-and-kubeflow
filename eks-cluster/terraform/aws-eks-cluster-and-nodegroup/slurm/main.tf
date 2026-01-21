@@ -131,17 +131,39 @@ resource "helm_release" "slurm" {
   chart = "oci://ghcr.io/slinkyproject/charts/slurm"
   name = "slurm"
   namespace = kubernetes_namespace.slurm.metadata[0].name
-  version = "0.3.0"
+  version = "0.4.1"
   wait = true
-  timeout = 300
-  
+  timeout = 600
+
   values = [
     <<-EOT
-      login:
-        enabled: ${var.login_enabled}
-        service:
-          type: ClusterIP
-        rootSshAuthorizedKeys: var.root_ssh_authorized_keys
+      # Login node configuration - port-forward access
+      loginsets:
+        default:
+          enabled: ${var.login_enabled}
+          replicas: 1
+          login:
+            volumeMounts:
+              - name: fsx-storage
+                mountPath: /fsx
+              - name: efs-storage
+                mountPath: /efs
+          rootSshAuthorizedKeys: |
+            ${indent(12, join("\n", var.root_ssh_authorized_keys))}
+          podSpec:
+            volumes:
+              - name: fsx-storage
+                persistentVolumeClaim:
+                  claimName: ${local.pvc_name}
+              - name: efs-storage
+                persistentVolumeClaim:
+                  claimName: ${var.efs_pvc_name}
+          service:
+            spec:
+              type: ClusterIP
+            port: 22
+
+      # Accounting - Aurora MySQL Serverless
       accounting:
         enabled: true
         external:
@@ -151,28 +173,76 @@ resource "helm_release" "slurm" {
           database: "${aws_rds_cluster.db.database_name}"
           user: "slurm"
           password: "${random_password.db.result}"
-      slurm-exporter:
+
+      # Disable built-in MariaDB (using Aurora)
+      mariadb:
         enabled: false
+
+      # Enable Slurm exporter for metrics
+      slurm-exporter:
+        enabled: true
+
+      # REST API
       restapi:
         service:
           type: ClusterIP
+
+      # Controller
       controller:
         persistence:
           storageClass: "slurm-ebs-sc-wait"
           size: 100Gi
         service:
-          type: ClusterIP 
-      mariadb:
-        enabled: false
-      compute:
-        nodesets: {}
+          type: ClusterIP
+
+      # Compute NodeSet - Karpenter managed GPU nodes
+      nodesets:
+        gpu:
+          enabled: true
+          replicas: ${var.compute_nodeset_replicas}
+          slurmd:
+            image:
+              repository: ${var.slurmd_image_repository}
+              tag: ${var.slurmd_image_tag}
+            resources:
+              limits:
+                nvidia.com/gpu: "${var.compute_gpu_per_node}"
+                vpc.amazonaws.com/efa: ${var.compute_efa_per_node}
+              requests:
+                nvidia.com/gpu: "${var.compute_gpu_per_node}"
+                vpc.amazonaws.com/efa: ${var.compute_efa_per_node}
+            volumeMounts:
+              - name: fsx-storage
+                mountPath: /fsx
+              - name: efs-storage
+                mountPath: /efs
+              - name: shmem
+                mountPath: /dev/shm
+          podSpec:
+            nodeSelector:
+              karpenter.sh/nodepool: ${var.karpenter_nodepool_name}
+              kubernetes.io/os: linux
+            tolerations:
+              - key: "nvidia.com/gpu"
+                operator: "Exists"
+                effect: "NoSchedule"
+            volumes:
+              - name: fsx-storage
+                persistentVolumeClaim:
+                  claimName: ${local.pvc_name}
+              - name: efs-storage
+                persistentVolumeClaim:
+                  claimName: ${var.efs_pvc_name}
+              - name: shmem
+                hostPath:
+                  path: /dev/shm
     EOT
   ]
 
   depends_on = [
     local.pvc_release,
     aws_rds_cluster.db,
-    aws_rds_cluster_instance.db, 
+    aws_rds_cluster_instance.db,
     helm_release.slurm_operator,
     helm_release.slurm_ebs_sc
   ]
@@ -183,5 +253,5 @@ resource "helm_release" "slurm_operator" {
   chart = "oci://ghcr.io/slinkyproject/charts/slurm-operator"
   name = "slurm-operator"
   namespace = kubernetes_namespace.slurm.metadata[0].name
-  version = "0.3.0"
+  version = "0.4.1"
 }

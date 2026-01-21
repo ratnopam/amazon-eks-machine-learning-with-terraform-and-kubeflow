@@ -1826,10 +1826,20 @@ module "slurm" {
     dns_name   = "${aws_fsx_lustre_file_system.fs.id}.fsx.${var.region}.amazonaws.com"
   }
 
+  # Slurm compute NodeSet configuration
+  slurmd_image_repository   = var.slurmd_image_repository
+  slurmd_image_tag          = var.slurmd_image_tag
+  compute_nodeset_replicas  = var.slurm_compute_replicas
+  compute_gpu_per_node      = var.slurm_gpus_per_node
+  compute_efa_per_node      = var.slurm_efa_per_node
+  karpenter_nodepool_name   = var.slurm_karpenter_nodepool
+  efs_pvc_name              = var.slurm_efs_pvc_name
+
   depends_on = [
     aws_efs_file_system.fs,
     aws_fsx_lustre_file_system.fs,
-    module.eks_blueprints_addons
+    module.eks_blueprints_addons,
+    helm_release.karpenter_components
   ]
 }
 
