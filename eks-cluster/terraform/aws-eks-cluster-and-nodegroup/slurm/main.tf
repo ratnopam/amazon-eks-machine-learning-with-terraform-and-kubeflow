@@ -127,6 +127,17 @@ locals {
   pvc_path = var.storage_type == "efs" ? "/efs/home" : "/fsx/home"
 }
 
+resource "kubernetes_secret" "slurm_db_password" {                                                                                                                  
+  metadata {                                                                                                                                                        
+    name      = "slurm-db-password"                                                                                                                                 
+    namespace = kubernetes_namespace.slurm.metadata[0].name                                                                                                         
+  }                                                                                                                                                                 
+                                                                                                                                                                    
+  data = {                                                                                                                                                          
+    password = random_password.db.result                                                                                                                            
+  }                                                                                                                                                                 
+}
+
 resource "helm_release" "slurm" {
   chart = "oci://ghcr.io/slinkyproject/charts/slurm"
   name = "slurm"
@@ -144,20 +155,15 @@ resource "helm_release" "slurm" {
           replicas: 1
           login:
             volumeMounts:
-              - name: fsx-storage
-                mountPath: /fsx
-              - name: efs-storage
-                mountPath: /efs
+              - name: shared-storage
+                mountPath: ${local.pvc_path}
           rootSshAuthorizedKeys: |
             ${indent(12, join("\n", var.root_ssh_authorized_keys))}
           podSpec:
             volumes:
-              - name: fsx-storage
+              - name: shared-storage
                 persistentVolumeClaim:
                   claimName: ${local.pvc_name}
-              - name: efs-storage
-                persistentVolumeClaim:
-                  claimName: ${var.efs_pvc_name}
           service:
             spec:
               type: ClusterIP
@@ -166,17 +172,16 @@ resource "helm_release" "slurm" {
       # Accounting - Aurora MySQL Serverless
       accounting:
         enabled: true
-        external:
+        storageConfig:
           enabled: true
           host: "${aws_rds_cluster.db.endpoint}"
           port: ${aws_rds_cluster.db.port}
           database: "${aws_rds_cluster.db.database_name}"
-          user: "slurm"
-          password: "${random_password.db.result}"
+          username: "slurm"
+          passwordKeyRef:
+            name: slurm-db-password
+            key: password
 
-      # Disable built-in MariaDB (using Aurora)
-      mariadb:
-        enabled: false
 
       # Enable Slurm exporter for metrics
       slurm-exporter:
@@ -197,7 +202,7 @@ resource "helm_release" "slurm" {
 
       # Compute NodeSet - Karpenter managed GPU nodes
       nodesets:
-        gpu:
+        slinky:
           enabled: true
           replicas: ${var.compute_nodeset_replicas}
           slurmd:
@@ -212,10 +217,8 @@ resource "helm_release" "slurm" {
                 nvidia.com/gpu: "${var.compute_gpu_per_node}"
                 vpc.amazonaws.com/efa: ${var.compute_efa_per_node}
             volumeMounts:
-              - name: fsx-storage
-                mountPath: /fsx
-              - name: efs-storage
-                mountPath: /efs
+              - name: shared-storage
+                mountPath: ${local.pvc_path}
               - name: shmem
                 mountPath: /dev/shm
           podSpec:
@@ -227,12 +230,9 @@ resource "helm_release" "slurm" {
                 operator: "Exists"
                 effect: "NoSchedule"
             volumes:
-              - name: fsx-storage
+              - name: shared-storage
                 persistentVolumeClaim:
                   claimName: ${local.pvc_name}
-              - name: efs-storage
-                persistentVolumeClaim:
-                  claimName: ${var.efs_pvc_name}
               - name: shmem
                 hostPath:
                   path: /dev/shm
@@ -243,6 +243,7 @@ resource "helm_release" "slurm" {
     local.pvc_release,
     aws_rds_cluster.db,
     aws_rds_cluster_instance.db,
+    kubernetes_secret.slurm_db_password,
     helm_release.slurm_operator,
     helm_release.slurm_ebs_sc
   ]
@@ -254,4 +255,9 @@ resource "helm_release" "slurm_operator" {
   name = "slurm-operator"
   namespace = kubernetes_namespace.slurm.metadata[0].name
   version = "0.4.1"
+
+  set {                                                                                                                                                             
+    name  = "crds.enabled"                                                                                                                                          
+    value = "true"                                                                                                                                                  
+  }
 }

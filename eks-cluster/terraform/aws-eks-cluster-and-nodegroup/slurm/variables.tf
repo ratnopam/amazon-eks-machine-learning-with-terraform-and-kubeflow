@@ -106,7 +106,7 @@ variable "karpenter_nodepool_name" {
 }
 
 variable "efs_pvc_name" {
-  description = "EFS PVC name in kubeflow namespace"
+  description = "EFS PVC name in slurm namespace"
   type        = string
-  default     = "efs-pvc"
+  default     = "slurm-efs-pvc"
 }

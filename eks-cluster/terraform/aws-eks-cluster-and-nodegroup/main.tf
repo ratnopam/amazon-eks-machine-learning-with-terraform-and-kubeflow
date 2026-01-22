@@ -1833,7 +1833,6 @@ module "slurm" {
   compute_gpu_per_node      = var.slurm_gpus_per_node
   compute_efa_per_node      = var.slurm_efa_per_node
   karpenter_nodepool_name   = var.slurm_karpenter_nodepool
-  efs_pvc_name              = var.slurm_efs_pvc_name
 
   depends_on = [
     aws_efs_file_system.fs,
