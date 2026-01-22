@@ -8,11 +8,42 @@
 #
 # The notebook reads fine-tune.yaml (base config) + this file (slurm overlay)
 # and generates sbatch scripts dynamically.
+#
+# Supported Launchers:
+#   - lightning: PyTorch Lightning (default) - auto-detects Slurm
+#   - accelerate: HuggingFace Accelerate - uses accelerate.commands.launch
+#   - torchrun: PyTorch distributed.run - native PyTorch launcher
+#   - nemo: NVIDIA NeMo 2.0 - uses torchrun with NeMo settings
+#   - ray: Ray Train - starts Ray cluster, then submits job
 
 slurm:
   enabled: true
   job_name: "ptl-qwen3-14b-sft"
   partition: "gpu"
   exclusive: true
+  master_port: 29500
+
+  # Launcher selection (default: lightning)
+  # PyTorch Lightning auto-detects Slurm and handles distributed training internally
+  launcher: lightning
+
+  # For accelerate launcher, uncomment:
+  # launcher: accelerate
+  # launcher_config:
+  #   config_file: /path/to/accelerate.yaml  # Optional
+
+  # For torchrun launcher, uncomment:
+  # launcher: torchrun
+  # launcher_config:
+  #   max_restarts: 0
+
+  # For NeMo 2.0 launcher, uncomment:
+  # launcher: nemo
+  # launcher_config:
+  #   max_restarts: 0
+
+  # For Ray Train launcher, uncomment:
+  # launcher: ray
+
   # time: "24:00:00"  # Optional time limit
   # account: "myproject"  # Optional account/project

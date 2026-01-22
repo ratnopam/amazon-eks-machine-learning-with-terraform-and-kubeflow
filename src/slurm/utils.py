@@ -2,9 +2,17 @@
 
 This module provides utilities to:
 - Generate sbatch scripts from training YAML configs (same format as pytorchjob-distributed)
+- Support multiple launcher frameworks: lightning, accelerate, torchrun, nemo, ray
 - Submit jobs to Slurm via kubectl exec
 - Wait for job completion
 - Scale Slurm NodeSets
+
+Supported Launchers:
+- lightning: PyTorch Lightning (default) - auto-detects Slurm environment
+- accelerate: HuggingFace Accelerate - uses accelerate.commands.launch
+- torchrun: PyTorch distributed.run - native PyTorch launcher
+- nemo: NVIDIA NeMo 2.0 - uses torchrun with NeMo-specific settings
+- ray: Ray Train - starts Ray cluster, then submits job
 
 Usage:
     from slurm.utils import generate_sbatch_from_yaml, submit_slurm_job, wait_for_slurm_job
@@ -26,7 +34,7 @@ Usage:
 
 import subprocess
 import time
-from typing import Optional
+from typing import Optional, Dict, Any
 
 
 def generate_sbatch_from_yaml(config: dict, job_name: str) -> str:
@@ -34,7 +42,7 @@ def generate_sbatch_from_yaml(config: dict, job_name: str) -> str:
     Generate sbatch script content from training YAML config.
 
     Reads the same YAML format used by pytorchjob-distributed helm chart
-    and generates equivalent sbatch script.
+    and generates equivalent sbatch script. Supports multiple launchers.
 
     Args:
         config: Merged config dict (base yaml + slurm.yaml overlay)
@@ -52,47 +60,27 @@ def generate_sbatch_from_yaml(config: dict, job_name: str) -> str:
     nproc_per_node = resources.get('nproc_per_node', 8)
     gpu_request = resources.get('requests', {}).get('nvidia.com/gpu', 8)
     gpu_count = int(gpu_request) if gpu_request else 8
+    cpus_per_task = resources.get('cpus_per_task', 96)
 
     # Slurm-specific options
+    launcher = slurm.get('launcher', 'lightning')
     partition = slurm.get('partition', 'gpu')
     exclusive = slurm.get('exclusive', True)
     time_limit = slurm.get('time', '')
 
+    # Launcher-specific options
+    launcher_config = slurm.get('launcher_config', {})
+
     # Build environment variables section
-    env_vars = []
-    for env in train.get('env', []):
-        name = env['name']
-        # Replace helm template variable with job_name
-        value = env['value'].replace('{{ .Release.Name }}', job_name)
-        env_vars.append(f'export {name}="{value}"')
+    env_vars = _build_env_vars(train.get('env', []), job_name)
 
     # Build pre_script section
-    pre_script_lines = config.get('pre_script', [])
-    # Filter out lines that use PET_* variables in export statements
-    # (we'll set those ourselves)
-    filtered_pre_script = []
-    for line in pre_script_lines:
-        if isinstance(line, str):
-            # Skip export lines that reference PET_ vars
-            if line.strip().startswith('export ') and 'PET_' in line:
-                continue
-            filtered_pre_script.append(line)
-    pre_script = '\n'.join(filtered_pre_script)
+    pre_script = _build_pre_script(config.get('pre_script', []))
 
-    # Build command and args
+    # Build command and args (for non-launcher commands like python script.py)
     command_list = train.get('command', ['python'])
     args_list = train.get('args', [])
-
-    # Replace PET_* variables with Slurm equivalents in args
-    processed_args = []
-    for arg in args_list:
-        if isinstance(arg, str):
-            arg = arg.replace('$PET_NNODES', '${SLURM_JOB_NUM_NODES}')
-            arg = arg.replace('$PET_NPROC_PER_NODE', str(nproc_per_node))
-            arg = arg.replace('$PET_NODE_RANK', '${SLURM_NODEID}')
-            arg = arg.replace('$PET_MASTER_ADDR', '${MASTER_ADDR}')
-            arg = arg.replace('$PET_MASTER_PORT', '${MASTER_PORT}')
-            processed_args.append(arg)
+    processed_args = _process_args(args_list, nproc_per_node)
 
     command = ' '.join(command_list)
     args = ' \\\n    '.join(processed_args) if processed_args else ''
@@ -101,26 +89,36 @@ def generate_sbatch_from_yaml(config: dict, job_name: str) -> str:
     time_directive = f'#SBATCH --time={time_limit}' if time_limit else ''
     exclusive_directive = '#SBATCH --exclusive' if exclusive else ''
 
-    # Generate sbatch script
-    sbatch = f'''#!/bin/bash
+    # Generate header
+    header = f'''#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --nodes={nnodes}
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=96
+#SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --gpus-per-node={gpu_count}
 #SBATCH --output=/efs/home/{job_name}/logs/%x_%j.out
 #SBATCH --error=/efs/home/{job_name}/logs/%x_%j.err
 {exclusive_directive}
 {time_directive}
 
+echo "START TIME: $(date)"
+
+# Auto-fail on errors
+set -eo pipefail
+
 # ============================================
 # Environment Setup (from train.env in yaml)
 # ============================================
 {chr(10).join(env_vars)}
 
-# Distributed training variables (Slurm equivalents of PET_* vars)
+# Distributed training variables
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
-export MASTER_PORT=29500
+export MASTER_PORT={slurm.get('master_port', 29500)}
+export GPUS_PER_NODE={gpu_count}
+export NNODES=$SLURM_NNODES
+export NUM_PROCESSES=$(($NNODES * $GPUS_PER_NODE))
+
+# PET_* compatibility variables (for scripts using PyTorchJob conventions)
 export PET_MASTER_ADDR=$MASTER_ADDR
 export PET_MASTER_PORT=$MASTER_PORT
 export PET_NNODES=$SLURM_JOB_NUM_NODES
@@ -128,23 +126,298 @@ export PET_NPROC_PER_NODE={nproc_per_node}
 export PET_NODE_RANK=$SLURM_NODEID
 
 # Create directories
-mkdir -p $HOME/logs/$SLURM_NODEID
-mkdir -p $HOME/output
+mkdir -p /efs/home/{job_name}/logs
+mkdir -p /efs/home/{job_name}/output
 
 # ============================================
 # Pre-script (from pre_script in yaml)
 # ============================================
 {pre_script}
-
-# ============================================
-# Launch Training (from train.command/args)
-# ============================================
-srun --export=ALL {command} {args}
 '''
+
+    # Generate launcher-specific section
+    launch_section = _generate_launcher_section(
+        launcher=launcher,
+        launcher_config=launcher_config,
+        command=command,
+        args=args,
+        nproc_per_node=nproc_per_node,
+        job_name=job_name
+    )
+
+    footer = '''
+echo "END TIME: $(date)"
+'''
+
+    sbatch = header + launch_section + footer
+
     # Clean up empty SBATCH lines
     lines = sbatch.split('\n')
     lines = [l for l in lines if not (l.startswith('#SBATCH') and l.strip() == '#SBATCH')]
     return '\n'.join(lines)
+
+
+def _build_env_vars(env_list: list, job_name: str) -> list:
+    """Build environment variable export statements."""
+    env_vars = []
+    for env in env_list:
+        name = env['name']
+        value = env['value'].replace('{{ .Release.Name }}', job_name)
+        env_vars.append(f'export {name}="{value}"')
+    return env_vars
+
+
+def _build_pre_script(pre_script_lines: list) -> str:
+    """Build pre-script section, filtering PET_* exports."""
+    filtered = []
+    for line in pre_script_lines:
+        if isinstance(line, str):
+            # Skip export lines that reference PET_ vars (we set those ourselves)
+            if line.strip().startswith('export ') and 'PET_' in line:
+                continue
+            filtered.append(line)
+    return '\n'.join(filtered)
+
+
+def _process_args(args_list: list, nproc_per_node: int) -> list:
+    """Replace PET_* variables with Slurm equivalents."""
+    processed = []
+    for arg in args_list:
+        if isinstance(arg, str):
+            arg = arg.replace('$PET_NNODES', '${SLURM_JOB_NUM_NODES}')
+            arg = arg.replace('$PET_NPROC_PER_NODE', str(nproc_per_node))
+            arg = arg.replace('$PET_NODE_RANK', '${SLURM_NODEID}')
+            arg = arg.replace('$PET_MASTER_ADDR', '${MASTER_ADDR}')
+            arg = arg.replace('$PET_MASTER_PORT', '${MASTER_PORT}')
+            processed.append(arg)
+    return processed
+
+
+def _generate_launcher_section(
+    launcher: str,
+    launcher_config: Dict[str, Any],
+    command: str,
+    args: str,
+    nproc_per_node: int,
+    job_name: str
+) -> str:
+    """Generate launcher-specific launch section."""
+
+    if launcher == 'lightning':
+        return _generate_lightning_launcher(command, args)
+    elif launcher == 'accelerate':
+        return _generate_accelerate_launcher(command, args, launcher_config, nproc_per_node)
+    elif launcher == 'torchrun':
+        return _generate_torchrun_launcher(command, args, launcher_config, nproc_per_node)
+    elif launcher == 'nemo':
+        return _generate_nemo_launcher(command, args, launcher_config, nproc_per_node)
+    elif launcher == 'ray':
+        return _generate_ray_launcher(command, args, launcher_config, job_name)
+    else:
+        raise ValueError(f"Unknown launcher: {launcher}. Supported: lightning, accelerate, torchrun, nemo, ray")
+
+
+def _generate_lightning_launcher(command: str, args: str) -> str:
+    """
+    PyTorch Lightning launcher.
+
+    Lightning auto-detects Slurm environment via SLURMEnvironment.
+    Uses simple srun to launch one process per node; Lightning handles GPU workers.
+    """
+    return f'''
+# ============================================
+# Launch Training (PyTorch Lightning)
+# ============================================
+# Lightning auto-detects Slurm and manages distributed training internally
+
+srun --export=ALL {command} {args}
+'''
+
+
+def _generate_accelerate_launcher(
+    command: str,
+    args: str,
+    config: Dict[str, Any],
+    nproc_per_node: int
+) -> str:
+    """
+    HuggingFace Accelerate launcher.
+
+    Uses python -m accelerate.commands.launch with delayed variable interpolation.
+    """
+    config_file = config.get('config_file', '')
+    config_arg = f'--config_file {config_file}' if config_file else ''
+
+    # Extract just the python script and its args (remove 'python' prefix if present)
+    program = args if not command.strip().endswith('python') else f'{command} {args}'
+    if program.startswith('python '):
+        program = program[7:]  # Remove 'python ' prefix
+
+    return f'''
+# ============================================
+# Launch Training (HuggingFace Accelerate)
+# ============================================
+# Uses delayed variable interpolation for SLURM_PROCID
+
+LAUNCHER="python -u -m accelerate.commands.launch \\
+    --rdzv_conf rdzv_backend=c10d,rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \\
+    {config_arg} \\
+    --num_processes $NUM_PROCESSES \\
+    --num_machines $NNODES \\
+    --main_process_ip $MASTER_ADDR \\
+    --main_process_port $MASTER_PORT \\
+    --machine_rank \\$SLURM_PROCID \\
+    --tee 3"
+
+PROGRAM="{program}"
+
+export CMD="$LAUNCHER $PROGRAM"
+echo "Running: $CMD"
+
+# srun with delayed interpolation
+SRUN_ARGS="--wait=60 --kill-on-bad-exit=1"
+srun $SRUN_ARGS bash -c "$CMD" 2>&1 | tee -a /efs/home/$SLURM_JOB_NAME/logs/main_log.txt
+'''
+
+
+def _generate_torchrun_launcher(
+    command: str,
+    args: str,
+    config: Dict[str, Any],
+    nproc_per_node: int
+) -> str:
+    """
+    PyTorch torchrun (torch.distributed.run) launcher.
+
+    """
+    max_restarts = config.get('max_restarts', 0)
+
+    # Extract just the python script and its args
+    program = args if not command.strip().endswith('python') else f'{command} {args}'
+    if program.startswith('python '):
+        program = program[7:]
+
+    return f'''
+# ============================================
+# Launch Training (torchrun)
+# ============================================
+# Uses delayed variable interpolation for SLURM_PROCID
+
+LAUNCHER="python -u -m torch.distributed.run \\
+    --nproc_per_node $GPUS_PER_NODE \\
+    --nnodes $NNODES \\
+    --node_rank \\$SLURM_PROCID \\
+    --rdzv_endpoint $MASTER_ADDR:$MASTER_PORT \\
+    --rdzv_backend c10d \\
+    --max_restarts {max_restarts} \\
+    --tee 3"
+
+PROGRAM="{program}"
+
+export CMD="$LAUNCHER $PROGRAM"
+echo "Running: $CMD"
+
+# srun with delayed interpolation
+SRUN_ARGS="--wait=60 --kill-on-bad-exit=1"
+srun $SRUN_ARGS bash -c "$CMD" 2>&1 | tee -a /efs/home/$SLURM_JOB_NAME/logs/main_log.txt
+'''
+
+
+def _generate_nemo_launcher(
+    command: str,
+    args: str,
+    config: Dict[str, Any],
+    nproc_per_node: int
+) -> str:
+    """
+    NVIDIA NeMo 2.0 launcher.
+
+    NeMo uses torchrun under the hood with specific environment settings.
+    Reference: https://docs.nvidia.com/nemo-framework/user-guide/latest/nemo-2.0/quickstart.html
+    """
+    max_restarts = config.get('max_restarts', 0)
+
+    # Extract script and args
+    program = args if not command.strip().endswith('python') else f'{command} {args}'
+    if program.startswith('python '):
+        program = program[7:]
+
+    return f'''
+# ============================================
+# Launch Training (NVIDIA NeMo 2.0)
+# ============================================
+# NeMo-specific environment settings
+export NCCL_IB_SL=1
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NCCL_ASYNC_ERROR_HANDLING=1
+
+LAUNCHER="python -u -m torch.distributed.run \\
+    --nproc_per_node $GPUS_PER_NODE \\
+    --nnodes $NNODES \\
+    --node_rank \\$SLURM_PROCID \\
+    --rdzv_endpoint $MASTER_ADDR:$MASTER_PORT \\
+    --rdzv_backend c10d \\
+    --max_restarts {max_restarts} \\
+    --tee 3"
+
+PROGRAM="{program}"
+
+export CMD="$LAUNCHER $PROGRAM"
+echo "Running: $CMD"
+
+# srun with delayed interpolation
+SRUN_ARGS="--wait=60 --kill-on-bad-exit=1"
+srun $SRUN_ARGS bash -c "$CMD" 2>&1 | tee -a /efs/home/$SLURM_JOB_NAME/logs/main_log.txt
+'''
+
+
+def _generate_ray_launcher(
+    command: str,
+    args: str,
+    config: Dict[str, Any],
+    job_name: str
+) -> str:
+    """
+    Ray Train launcher.
+
+    Ray uses a different model: starts Ray cluster first, then submits jobs.
+    Reference: https://docs.ray.io/en/latest/cluster/vms/user-guides/community/slurm.html
+    """
+    return f'''
+# ============================================
+# Launch Training (Ray Train)
+# ============================================
+# Start Ray cluster on all nodes, run training on head node
+
+# Get head node address
+HEAD_NODE=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+HEAD_NODE_IP=$(srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" hostname -I | awk '{{print $1}}')
+RAY_PORT=6379
+
+echo "Starting Ray cluster with head node: $HEAD_NODE_IP:$RAY_PORT"
+
+# Start Ray head on first node
+srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" \\
+    ray start --head --port=$RAY_PORT --num-cpus=$SLURM_CPUS_PER_TASK --num-gpus=$GPUS_PER_NODE --block &
+
+sleep 10
+
+# Start Ray workers on remaining nodes
+if [ $SLURM_NNODES -gt 1 ]; then
+    WORKER_NODES=$(scontrol show hostnames $SLURM_JOB_NODELIST | tail -n +2 | tr '\\n' ',')
+    srun --nodes=$((SLURM_NNODES-1)) --ntasks=$((SLURM_NNODES-1)) -w "$WORKER_NODES" \\
+        ray start --address="$HEAD_NODE_IP:$RAY_PORT" --num-cpus=$SLURM_CPUS_PER_TASK --num-gpus=$GPUS_PER_NODE --block &
+fi
+
+sleep 10
+
+# Run training script on head node
+echo "Submitting Ray job..."
+srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" {command} {args}
+
+# Cleanup Ray cluster
+ray stop
+'''
 
 
 def wait_for_slurm_job(job_id: str, namespace: str = 'slurm', timeout: int = 7200) -> bool:
@@ -190,7 +463,7 @@ def wait_for_slurm_job(job_id: str, namespace: str = 'slurm', timeout: int = 720
     raise TimeoutError(f"Job {job_id} timeout after {timeout}s")
 
 
-def scale_slurm_nodeset(replicas: int, nodeset: str = 'gpu', namespace: str = 'slurm') -> bool:
+def scale_slurm_nodeset(replicas: int, nodeset: str = 'slinky', namespace: str = 'slurm') -> bool:
     """
     Scale Slurm NodeSet replicas.
 
