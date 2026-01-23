@@ -19,7 +19,7 @@
 slurm:
   enabled: true
   job_name: "ptl-qwen3-14b-sft"
-  partition: "gpu"
+  partition: "slinky"
   exclusive: true
   master_port: 29500
 

@@ -80,7 +80,11 @@ def generate_sbatch_from_yaml(config: dict, job_name: str) -> str:
     # Build command and args (for non-launcher commands like python script.py)
     command_list = train.get('command', ['python'])
     args_list = train.get('args', [])
-    processed_args = _process_args(args_list, nproc_per_node)
+
+    # For lightning launcher: each srun task handles 1 GPU, so gpus_per_node arg should be 1
+    # For other launchers: torchrun/accelerate spawn workers, so use full nproc_per_node
+    effective_gpus_per_node = 1 if launcher == 'lightning' else nproc_per_node
+    processed_args = _process_args(args_list, effective_gpus_per_node)
 
     command = ' '.join(command_list)
     args = ' \\\n    '.join(processed_args) if processed_args else ''
@@ -89,12 +93,20 @@ def generate_sbatch_from_yaml(config: dict, job_name: str) -> str:
     time_directive = f'#SBATCH --time={time_limit}' if time_limit else ''
     exclusive_directive = '#SBATCH --exclusive' if exclusive else ''
 
+    # ntasks-per-node depends on launcher:
+    # - lightning: srun spawns tasks, need ntasks = gpus
+    # - torchrun/accelerate/nemo: torchrun spawns workers, need ntasks = 1
+    ntasks_per_node = nproc_per_node if launcher == 'lightning' else 1
+
+    # Adjust cpus-per-task based on ntasks (total CPUs / tasks)
+    cpus_per_task_adjusted = cpus_per_task // ntasks_per_node if ntasks_per_node > 1 else cpus_per_task
+
     # Generate header
     header = f'''#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --nodes={nnodes}
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task={cpus_per_task}
+#SBATCH --ntasks-per-node={ntasks_per_node}
+#SBATCH --cpus-per-task={cpus_per_task_adjusted}
 #SBATCH --gpus-per-node={gpu_count}
 #SBATCH --output=/efs/home/{job_name}/logs/%x_%j.out
 #SBATCH --error=/efs/home/{job_name}/logs/%x_%j.err
@@ -204,7 +216,7 @@ def _generate_launcher_section(
     """Generate launcher-specific launch section."""
 
     if launcher == 'lightning':
-        return _generate_lightning_launcher(command, args)
+        return _generate_lightning_launcher(command, args, nproc_per_node)
     elif launcher == 'accelerate':
         return _generate_accelerate_launcher(command, args, launcher_config, nproc_per_node)
     elif launcher == 'torchrun':
@@ -217,20 +229,23 @@ def _generate_launcher_section(
         raise ValueError(f"Unknown launcher: {launcher}. Supported: lightning, accelerate, torchrun, nemo, ray")
 
 
-def _generate_lightning_launcher(command: str, args: str) -> str:
+def _generate_lightning_launcher(command: str, args: str, nproc_per_node: int = 8) -> str:
     """
     PyTorch Lightning launcher.
 
     Lightning auto-detects Slurm environment via SLURMEnvironment.
-    Uses simple srun to launch one process per node; Lightning handles GPU workers.
+    sbatch allocates ntasks-per-node=gpus, srun spawns one task per GPU for FSDP/DDP.
+    Each task gets CUDA_VISIBLE_DEVICES set to its local rank (SLURM_LOCALID).
     """
     return f'''
 # ============================================
 # Launch Training (PyTorch Lightning)
 # ============================================
-# Lightning auto-detects Slurm and manages distributed training internally
+# sbatch allocated {nproc_per_node} tasks per node (one per GPU)
+# Each task sees only its assigned GPU via CUDA_VISIBLE_DEVICES
+# Lightning detects Slurm and coordinates FSDP/DDP across tasks
 
-srun --export=ALL {command} {args}
+srun --export=ALL bash -c 'export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID && {command} {args}'
 '''
 
 
@@ -463,13 +478,13 @@ def wait_for_slurm_job(job_id: str, namespace: str = 'slurm', timeout: int = 720
     raise TimeoutError(f"Job {job_id} timeout after {timeout}s")
 
 
-def scale_slurm_nodeset(replicas: int, nodeset: str = 'slinky', namespace: str = 'slurm') -> bool:
+def scale_slurm_nodeset(replicas: int, nodeset: str = 'slurm-worker-slinky', namespace: str = 'slurm') -> bool:
     """
     Scale Slurm NodeSet replicas.
 
     Args:
         replicas: Number of slurmd pod replicas
-        nodeset: Name of the NodeSet (default 'gpu')
+        nodeset: Name of the NodeSet (default 'slurm-worker-slinky')
         namespace: Kubernetes namespace
 
     Returns:
