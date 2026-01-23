@@ -150,7 +150,7 @@ resource "helm_release" "slurm" {
     <<-EOT
       # Login node configuration - port-forward access
       loginsets:
-        default:
+        slinky:
           enabled: ${var.login_enabled}
           replicas: 1
           login:
