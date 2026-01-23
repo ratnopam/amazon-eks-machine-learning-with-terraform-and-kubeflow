@@ -1809,8 +1809,9 @@ module "slurm" {
   slurm_namespace          = var.slurm_namespace
   efs_fs_id                = aws_efs_file_system.fs.id
   root_ssh_authorized_keys = var.slurm_root_ssh_authorized_keys
-  storage_capacity         = var.slurm_storage_capacity
-  storage_type             = var.slurm_storage_type
+  efs_storage_capacity     = var.slurm_efs_storage_capacity
+  fsx_enabled              = var.slurm_fsx_enabled
+  fsx_storage_capacity     = var.slurm_fsx_storage_capacity
   local_helm_repo          = var.local_helm_repo
   login_enabled            = var.slurm_login_enabled
   eks_cluster_id           = aws_eks_cluster.eks_cluster.id

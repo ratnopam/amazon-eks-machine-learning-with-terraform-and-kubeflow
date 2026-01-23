@@ -451,20 +451,22 @@ variable "slurm_login_enabled" {
   default = false
 }
 
-variable "slurm_storage_type" {
-  description = "Slurm shared storage type: efs or fsx"
+variable "slurm_efs_storage_capacity" {
+  description = "Slurm EFS storage capacity"
   type        = string
-  validation {
-    condition     = contains(["efs", "fsx"], var.slurm_storage_type)
-    error_message = "The slurm_storage_type must be either 'efs' or 'fsx'."
-  }
-  default = "efs"
+  default     = "1000Gi"
 }
 
-variable "slurm_storage_capacity" {
-  description = "Slurm shared storage capacity"
+variable "slurm_fsx_enabled" {
+  description = "Enable FSx for Lustre mount in Slurm pods (for pretrained models)"
+  type        = bool
+  default     = true
+}
+
+variable "slurm_fsx_storage_capacity" {
+  description = "Slurm FSx storage capacity"
   type        = string
-  default = "1200Gi"
+  default     = "1200Gi"
 }
 
 variable "slurm_db_max_capacity" {

@@ -77,14 +77,13 @@ resource "aws_db_subnet_group" "this" {
   subnet_ids = var.db_subnet_ids
 }
 
+# EFS is always created for home directory, checkpoints, logs
 resource "helm_release" "pv_efs" {
-  count = var.storage_type == "efs" ? 1 : 0
-
   chart = "${var.local_helm_repo}/pv-efs"
   name = "pv-efs"
   version = "1.0.0"
   namespace = kubernetes_namespace.slurm.metadata[0].name
-  
+
   values = [
     <<-EOT
       namespace: ${kubernetes_namespace.slurm.metadata[0].name}
@@ -93,19 +92,20 @@ resource "helm_release" "pv_efs" {
         claim_name: slurm-efs-pvc
         class_name: slurm-efs-sc
         fs_id: ${var.efs_fs_id}
-        storage: ${var.storage_capacity}
+        storage: ${var.efs_storage_capacity}
     EOT
   ]
 }
 
+# FSx is optional, used for pretrained models (fast reads)
 resource "helm_release" "pv_fsx" {
-  count = var.storage_type == "fsx" ? 1 : 0
+  count = var.fsx_enabled ? 1 : 0
 
   chart = "${var.local_helm_repo}/pv-fsx"
   name = "pv-fsx"
   version = "1.1.0"
   namespace = kubernetes_namespace.slurm.metadata[0].name
-  
+
   values = [
     <<-EOT
       namespace: ${kubernetes_namespace.slurm.metadata[0].name}
@@ -116,15 +116,9 @@ resource "helm_release" "pv_fsx" {
         fs_id: ${var.fsx.fs_id}
         mount_name: ${var.fsx.mount_name}
         dns_name: ${var.fsx.dns_name}
-        storage: ${var.storage_capacity}
+        storage: ${var.fsx_storage_capacity}
     EOT
   ]
-}
-
-locals {
-  pvc_release = var.storage_type == "efs" ? helm_release.pv_efs : helm_release.pv_fsx
-  pvc_name = var.storage_type == "efs" ? "slurm-efs-pvc" : "slurm-fsx-pvc"
-  pvc_path = var.storage_type == "efs" ? "/efs/home" : "/fsx/home"
 }
 
 resource "kubernetes_secret" "slurm_db_password" {                                                                                                                  
@@ -136,6 +130,70 @@ resource "kubernetes_secret" "slurm_db_password" {
   data = {                                                                                                                                                          
     password = random_password.db.result                                                                                                                            
   }                                                                                                                                                                 
+}
+
+locals {
+  # Volume mounts - always include EFS, optionally include FSx
+  efs_volume_mount = {
+    name = "efs-storage"
+    mountPath = "/efs"
+  }
+  fsx_volume_mount = {
+    name = "fsx-storage"
+    mountPath = "/fsx"
+  }
+  shmem_volume_mount = {
+    name = "shmem"
+    mountPath = "/dev/shm"
+  }
+
+  # Volumes - always include EFS, optionally include FSx
+  efs_volume = {
+    name = "efs-storage"
+    persistentVolumeClaim = {
+      claimName = "slurm-efs-pvc"
+    }
+  }
+  fsx_volume = {
+    name = "fsx-storage"
+    persistentVolumeClaim = {
+      claimName = "slurm-fsx-pvc"
+    }
+  }
+  shmem_volume = {
+    name = "shmem"
+    hostPath = {
+      path = "/dev/shm"
+    }
+  }
+
+  # Build volume lists dynamically based on fsx_enabled
+  # Using concat() to avoid terraform's "inconsistent tuple length" error with ternary
+  #
+  # Storage architecture (matches Kubeflow training flow):
+  #   /efs - EFS for HOME directory, datasets, checkpoints, logs (always mounted)
+  #   /fsx - FSx Lustre for pretrained models with fast parallel I/O (optional)
+  #   /dev/shm - Shared memory for NCCL (slurmd only)
+
+  slurmd_volume_mounts = concat(
+    [local.efs_volume_mount],
+    var.fsx_enabled ? [local.fsx_volume_mount] : [],
+    [local.shmem_volume_mount]
+  )
+  slurmd_volumes = concat(
+    [local.efs_volume],
+    var.fsx_enabled ? [local.fsx_volume] : [],
+    [local.shmem_volume]
+  )
+
+  login_volume_mounts = concat(
+    [local.efs_volume_mount],
+    var.fsx_enabled ? [local.fsx_volume_mount] : []
+  )
+  login_volumes = concat(
+    [local.efs_volume],
+    var.fsx_enabled ? [local.fsx_volume] : []
+  )
 }
 
 resource "helm_release" "slurm" {
@@ -154,16 +212,11 @@ resource "helm_release" "slurm" {
           enabled: ${var.login_enabled}
           replicas: 1
           login:
-            volumeMounts:
-              - name: shared-storage
-                mountPath: ${local.pvc_path}
+            volumeMounts: ${jsonencode(local.login_volume_mounts)}
           rootSshAuthorizedKeys: |
             ${indent(12, join("\n", var.root_ssh_authorized_keys))}
           podSpec:
-            volumes:
-              - name: shared-storage
-                persistentVolumeClaim:
-                  claimName: ${local.pvc_name}
+            volumes: ${jsonencode(local.login_volumes)}
           service:
             spec:
               type: ClusterIP
@@ -216,11 +269,7 @@ resource "helm_release" "slurm" {
               requests:
                 nvidia.com/gpu: "${var.compute_gpu_per_node}"
                 vpc.amazonaws.com/efa: ${var.compute_efa_per_node}
-            volumeMounts:
-              - name: shared-storage
-                mountPath: ${local.pvc_path}
-              - name: shmem
-                mountPath: /dev/shm
+            volumeMounts: ${jsonencode(local.slurmd_volume_mounts)}
           podSpec:
             nodeSelector:
               karpenter.sh/nodepool: ${var.karpenter_nodepool_name}
@@ -229,18 +278,13 @@ resource "helm_release" "slurm" {
               - key: "nvidia.com/gpu"
                 operator: "Exists"
                 effect: "NoSchedule"
-            volumes:
-              - name: shared-storage
-                persistentVolumeClaim:
-                  claimName: ${local.pvc_name}
-              - name: shmem
-                hostPath:
-                  path: /dev/shm
+            volumes: ${jsonencode(local.slurmd_volumes)}
     EOT
   ]
 
   depends_on = [
-    local.pvc_release,
+    helm_release.pv_efs,
+    helm_release.pv_fsx,
     aws_rds_cluster.db,
     aws_rds_cluster_instance.db,
     kubernetes_secret.slurm_db_password,

@@ -29,14 +29,22 @@ variable "login_enabled" {
   type        = bool
 }
 
-variable "storage_capacity" {
-  description = "Shared storage capacity"
+variable "efs_storage_capacity" {
+  description = "EFS storage capacity"
   type        = string
+  default     = "1000Gi"
 }
 
-variable "storage_type" {
-  description = "Shared storage type"
+variable "fsx_enabled" {
+  description = "Enable FSx for Lustre (for pretrained models)"
+  type        = bool
+  default     = false
+}
+
+variable "fsx_storage_capacity" {
+  description = "FSx storage capacity"
   type        = string
+  default     = "1200Gi"
 }
 
 variable "fsx" {
