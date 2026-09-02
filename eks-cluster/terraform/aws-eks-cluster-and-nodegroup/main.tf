@@ -1300,8 +1300,7 @@ resource "helm_release" "karpenter" {
     EOT
   ]
 
-  depends_on = [helm_release.karpenter-crd, helm_release.cluster-autoscaler]
-
+  depends_on = [helm_release.karpenter-crd, helm_release.cluster-autoscaler, module.karpenter]
 }
 
 resource "helm_release" "karpenter_components" {
