@@ -422,9 +422,30 @@ variable fsx_storage_capacity {
 }
 
 variable "dcgm_exporter_enabled" {
-  description = "Install DCGM Exporter"
+  # The NVIDIA dcgm-exporter helm release, scraped by kube-prometheus-stack via a
+  # ServiceMonitor. Pinned field list including the DCGM_FI_PROF_* profiling fields. Default
+  # off, i.e. GPU metrics come from CloudWatch unless you ask otherwise.
+  description = "Install NVIDIA DCGM Exporter (Prometheus/ServiceMonitor)"
   type        = bool
   default = false
+}
+
+variable "cloudwatch_dcgm_exporter_enabled" {
+  # The amazon-cloudwatch-observability addon deploys its OWN dcgm-exporter, whose field list
+  # is operator-managed and omits DCGM_FI_PROF_SM_ACTIVE and DCGM_FI_PROF_DRAM_ACTIVE. Setting
+  # this false sets accelerated_compute_metrics = false on the addon, which removes that
+  # exporter and with it the Container Insights GPU dashboards. Nothing else the addon
+  # collects (container logs, node and pod metrics) is affected.
+  #
+  # Deliberately INDEPENDENT of dcgm_exporter_enabled rather than derived from it: this is a
+  # variable about the CloudWatch addon, and a variable named for one component should not
+  # silently reconfigure another. Default true preserves existing cluster behaviour.
+  #
+  # Setting both true puts two DCGM hostengines on the same GPUs; see the check block in
+  # main.tf for why that is a warning and not an error.
+  description = "Let the amazon-cloudwatch-observability addon collect GPU metrics via its own DCGM exporter"
+  type        = bool
+  default = true
 }
 
 variable "slurm_enabled" {

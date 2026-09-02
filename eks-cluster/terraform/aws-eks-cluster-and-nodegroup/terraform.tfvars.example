@@ -3,3 +3,12 @@ region           = "us-east-1"
 azs              = ["us-east-1a", "us-east-1b", "us-east-1c"]
 profile          = "default"
 import_path      = "s3://<bucketname>/<prefix>/"
+
+# GPU metrics. Defaults (shown) keep the amazon-cloudwatch-observability addon's own
+# dcgm-exporter, which publishes 10 fields and omits DCGM_FI_PROF_SM_ACTIVE and
+# DCGM_FI_PROF_DRAM_ACTIVE. For GPU profiling work, hand GPU metrics to the NVIDIA
+# dcgm-exporter instead by setting the first true and the second false -- it carries a pinned
+# field list and is scraped by kube-prometheus-stack via a ServiceMonitor. Setting both true
+# puts two DCGM hostengines on the same GPUs and emits a warning.
+# dcgm_exporter_enabled            = false
+# cloudwatch_dcgm_exporter_enabled = true
