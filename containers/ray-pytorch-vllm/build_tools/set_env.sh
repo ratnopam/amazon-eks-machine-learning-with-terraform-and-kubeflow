@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 
 export IMAGE_NAME=ray-pytorch-vllm
-export IMAGE_TAG=2.54.1-py312-cu128-0.19.0
+export IMAGE_TAG=2.58.0-py312-cu130-0.29.0

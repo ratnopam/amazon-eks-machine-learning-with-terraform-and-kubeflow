@@ -1,6 +1,6 @@
 # Ray Serve Mistral Pixtral 12B 2409 Model
 
-This example illustrates how to use [Ray Serve](../../../charts/machine-learning/training/rayserve/) Helm chart to serve [mistralai/Pixtral-12B-2409](https://huggingface.co/mistralai/Pixtral-12B-2409) model.
+This example illustrates how to use [Ray Serve](../../../../charts/machine-learning/serving/rayserve/) Helm chart to serve [mistralai/Pixtral-12B-2409](https://huggingface.co/mistralai/Pixtral-12B-2409) model.
 
 Before proceeding, complete the [Prerequisites](../../../../README.md#prerequisites) and [Getting started](../../../../README.md#getting-started). See [What is in the YAML file](../../../../README.md#yaml-recipes) to understand the common fields in the Helm values files. There are some fields that are specific to a machine learning chart.
 

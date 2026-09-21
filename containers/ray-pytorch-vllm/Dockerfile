@@ -1,4 +1,4 @@
-FROM rayproject/ray:2.54.1-py312-cu128
+FROM rayproject/ray:2.58.0-py312-cu130
 
 # Combine environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -16,11 +16,10 @@ USER ray
 # Using --no-cache-dir keeps the image size down
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
-        vllm==0.19.0 \
-        pandas==3.0.2 \
-        pyarrow==23.0.1 \
-        scipy==1.17.1
-
-RUN pip install --no-cache-dir transformers==5.5.0
+        vllm==0.29.0 \
+        transformers==5.17.0 \
+        pandas==3.0.5 \
+        pyarrow==25.0.1 \
+        scipy==1.18.1
 
 CMD ["/bin/bash"]

@@ -1,5 +1,5 @@
 ray:
-  version: '2.54.1'
+  version: '2.58.0'
   dashboard:
     host: '0.0.0.0'
   ports:
@@ -22,6 +22,14 @@ ray:
         - name: pixtral-12b-2409
           import_path: openai_api:deployment
           runtime_env:
+            # vLLM 0.29.0 imports PixtralRotaryEmbedding from transformers, which
+            # transformers 5.17.0 (the image's version) renamed to
+            # PixtralVisionRotaryEmbedding. Pin this application back to the last
+            # version that still exports the old name; Ray layers it over the
+            # image's site-packages so the rest of the stack is untouched.
+            pip:
+              packages: ["transformers==5.16.1"]
+              pip_check: false
             env_vars:
               LD_LIBRARY_PATH: "/home/ray/anaconda3/lib/python3.12/site-packages/nvidia/cusparselt/lib:/usr/local/cuda/lib64"
               ENGINE_CONFIG: "/etc/engine-config/engine-config.json"
@@ -65,4 +73,4 @@ pvc:
     mount_path: /fsx
   - name: pv-efs
     mount_path: /efs
-framework: vllm-0.19.0
+framework: vllm-0.29.0
