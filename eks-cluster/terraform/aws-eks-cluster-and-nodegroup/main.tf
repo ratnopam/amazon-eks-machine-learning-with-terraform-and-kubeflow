@@ -2024,11 +2024,32 @@ resource "helm_release" "dcgm_exporter" {
     EOT
   ]
 
-  # Not helm_release.prometheus, because kube-prometheus-stack sets
-  # serviceMonitorSelectorNilUsesHelmValues = false above: the operator adopts this
-  # ServiceMonitor whenever it appears, in either order. Kept on cluster-autoscaler to
-  # match every other release in this file.
-  depends_on = [helm_release.cluster-autoscaler]
+  # MUST include helm_release.prometheus. An earlier version of this comment argued the
+  # dependency was unnecessary because kube-prometheus-stack sets
+  # serviceMonitorSelectorNilUsesHelmValues = false above, so "the operator adopts this
+  # ServiceMonitor whenever it appears, in either order." That is true and irrelevant: it
+  # governs whether the operator ADOPTS the object, not whether Helm can CREATE it.
+  #
+  # Creating a ServiceMonitor requires monitoring.coreos.com/v1 to be registered in the API
+  # server, and that CRD ships with kube-prometheus-stack. Without this dependency Terraform
+  # is free to run the two releases concurrently, and dcgm-exporter then fails at
+  # manifest-build time, before adoption is even reachable:
+  #   resource mapping not found for name: "dcgm-exporter" ... no matches for kind
+  #   "ServiceMonitor" in version "monitoring.coreos.com/v1" / ensure CRDs are installed first
+  # Observed on a clean apply of the owb-harness cluster, 2026-09-21. Adoption order is
+  # order-independent; CRD registration is not.
+  depends_on = [helm_release.cluster-autoscaler, helm_release.prometheus]
+
+  # prometheus_enabled = false with dcgm_exporter_enabled = true is unsatisfiable for the same
+  # reason: nothing else in this configuration installs the monitoring.coreos.com CRDs, so the
+  # release cannot succeed. Caught at plan time with a message naming both variables, rather
+  # than ~20 minutes into an apply as an opaque CRD mapping error.
+  lifecycle {
+    precondition {
+      condition     = var.prometheus_enabled
+      error_message = "dcgm_exporter_enabled = true requires prometheus_enabled = true: the NVIDIA dcgm-exporter release creates a ServiceMonitor, whose monitoring.coreos.com/v1 CRD is installed by the kube-prometheus-stack release. Set prometheus_enabled = true, or use cloudwatch_dcgm_exporter_enabled = true for GPU metrics without Prometheus."
+    }
+  }
 
 }
 
