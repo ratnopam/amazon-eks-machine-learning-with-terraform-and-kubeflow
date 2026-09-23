@@ -7,8 +7,9 @@ numbers are only comparable when nothing else contends for the same GPUs, and an
 GPU is shared by construction — so this gets its own cluster, its own Terraform state, and its
 own branch.
 
-> **Status:** cluster bring-up is documented and reproducible below. The harness itself is under
-> active implementation.
+> **Status:** the `owb-harness` cluster is up in us-west-2 and bring-up is reproducible below.
+> The harness itself is under active implementation — see [HANDOFF.md](./HANDOFF.md) for current
+> state, the phased plan, and the traps already hit.
 
 ## Cluster
 
